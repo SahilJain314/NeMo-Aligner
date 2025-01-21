@@ -12,15 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
+from collections import deque
+from itertools import chain
+from typing import Iterable, List, Optional
 
 import torch
 import torch.multiprocessing as mp
+from torch.utils.data import Dataset
 from megatron.core.utils import divide
 from omegaconf.omegaconf import OmegaConf
 
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
+from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import (
+    BaseMegatronSampler,
+)
+
 from nemo_aligner.algorithms.reinforce import ReinforceTrainer
 from nemo_aligner.data.nlp.builders import (
     build_dataloader,
@@ -53,6 +61,214 @@ OmegaConf.register_new_resolver("subtract", lambda x, y: x - y, replace=True)
 
 mp.set_start_method("spawn", force=True)
 
+class CombinedDataset(Dataset):
+    def __init__(self, main_dataset, hard_problems_list):
+        self.main_dataset = main_dataset
+        assert isinstance(hard_problems_list, list) or isinstance(hard_problems_list, deque)
+        self.hard_samples = list(hard_problems_list)
+        self.hard_sample_indices_to_remove = []
+        self.hard_samples_length_at_last_getitem = len(self.hard_samples)
+
+        
+    def __len__(self):
+        # Return the combined length, dynamically adjusts as hard_problems_list changes
+        return len(self.main_dataset) + len(self.hard_problems_list)
+
+    def add_hard_samples(self, hard_samples: List[int]) -> None:
+        """Add newly discovered hard samples to the queue."""
+        self.hard_samples += hard_samples
+
+    def remove_used_hard_samples(self) -> None:
+        """Remove hard samples that have been sampled from the queue."""
+        assert len(self.hard_samples) == self.hard_samples_length_at_last_getitem, \
+            "hard_samples length changed since last __getitem__ call. This will make indices incorrect."
+        self.hard_samples = [x for i, x in enumerate(self.hard_samples) 
+                           if i not in self.hard_sample_indices_to_remove]
+        self.hard_sample_indices_to_remove = []
+
+    def __getitem__(self, idx):
+        if idx < len(self.main_dataset):
+            return self.main_dataset[idx]
+        else:
+            # Fetch from hard problems, adjust index accordingly
+            hard_idx = idx - len(self.main_dataset)
+            self.hard_sample_indices_to_remove.append(hard_idx)
+            self.hard_samples_length_at_last_getitem = len(self.hard_samples)
+            return self.hard_samples[hard_idx]
+        
+class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
+    """
+    A dynamic sampler that:
+      - Reserves a fixed portion (hard_sample_ratio) of each micro-batch for hard samples.
+      - Fills the remainder with normal samples from [consumed_samples..total_samples).
+      - Any discovered "hard samples" can be queued via `add_hard_samples`.
+      - Works for multiple epochs by simply re-calling __iter__() each epoch (like standard PyTorch samplers).
+
+    The base class is unchanged. We only add logic here.
+    """
+
+    def __init__(
+        self,
+        total_samples: int,
+        consumed_samples: int,
+        micro_batch_size: int,
+        data_parallel_rank: int,
+        data_parallel_size: int,
+        drop_last: bool = True,
+        global_batch_size: Optional[int] = None,
+        rampup_batch_size: Optional[list] = None,
+        pad_samples_to_global_batch_size: Optional[bool] = False,
+        hard_sample_ratio: float = 0.4,  # Default 40% of each micro-batch is reserved for hard samples
+    ):
+        super().__init__(
+            total_samples=total_samples,
+            consumed_samples=consumed_samples,
+            micro_batch_size=micro_batch_size,
+            data_parallel_rank=data_parallel_rank,
+            data_parallel_size=data_parallel_size,
+            drop_last=drop_last,
+            global_batch_size=global_batch_size,
+            rampup_batch_size=rampup_batch_size,
+            pad_samples_to_global_batch_size=pad_samples_to_global_batch_size,
+        )
+        self.nb_hard_samples = 0
+        # A ratio [0,1] indicating what fraction of each micro-batch we aim to fill with hard samples
+        self.hard_sample_ratio = hard_sample_ratio
+
+    def add_nb_hard_samples(self, nb_hard_samples: int) -> None:
+        self.nb_hard_samples += nb_hard_samples
+        
+    def get_start_end_idx(self):
+        """
+        The slice within each micro-batch that this data-parallel rank should receive.
+        """
+        start_idx = self.data_parallel_rank * self.micro_batch_size
+        end_idx = start_idx + self.micro_batch_size
+        return start_idx, end_idx
+
+    def _get_padding_indices(self, pad_samples_num):
+        """
+        Provide 'fake' indices for padding if needed (e.g. -1, -2, ...).
+        """
+        return range(-1, -pad_samples_num - 1, -1)
+
+    def __iter__(self) -> Iterable[List[int]]:
+        # Normal sample range
+        normal_indices = range(self.consumed_samples, self.total_samples)
+
+        # Possibly pad to a global_batch_size if drop_last=False
+        if (not self.drop_last) and self.pad_samples_to_global_batch_size:
+            num_available = self.total_samples - self.consumed_samples
+            pad_samples_num = -num_available % self.global_batch_size
+            if pad_samples_num > 0:
+                pad_indices = self._get_padding_indices(pad_samples_num)
+                normal_indices = chain(normal_indices, pad_indices)
+
+        normal_indices_iter = iter(normal_indices)
+
+        batch = []
+        # We know the total size of each micro-batch across all ranks
+        total_batch_size = self.micro_batch_times_data_parallel_size
+        # How many hard samples we *want* in each micro-batch
+        desired_hard_samples = int(total_batch_size * self.hard_sample_ratio)
+
+        while True:
+            # 1) Fill the "reserved" portion with hard samples (or as many as the queue has)
+            batch_hard = []
+            if desired_hard_samples <= self.nb_hard_samples:
+                self.nb_hard_samples -= desired_hard_samples
+                batch_hard.append([i for i in range(desired_hard_samples)])
+            else:
+                batch_hard.append([i for i in range(self.nb_hard_samples)])
+                self.nb_hard_samples = 0
+            
+            # 2) Fill the remainder with normal samples until total_batch_size is reached
+            batch_regular = []
+            while (len(batch_hard) + len(batch_regular)) < total_batch_size:
+                try:
+                    idx = next(normal_indices_iter)
+                    batch_regular.append(idx)
+                except StopIteration:
+                    # Out of normal samples
+                    break
+
+            # Combine
+            batch = batch_hard + batch_regular
+
+            # If we formed a full micro-batch, yield it
+            if len(batch) == total_batch_size:
+                start_idx, end_idx = self.get_start_end_idx()
+                yield batch[start_idx:end_idx]
+                batch = []
+            else:
+                # Partial or empty. If partial and drop_last=False, yield it
+                if len(batch) > 0 and not self.drop_last:
+                    # Shouldn't happen if we pad to global batch size
+                    assert not self.pad_samples_to_global_batch_size, (
+                        "With pad_samples_to_global_batch_size=True, you shouldn't "
+                        "encounter partial micro-batches."
+                    )
+                    start_idx, end_idx = self.get_start_end_idx()
+                    yield batch[start_idx:end_idx]
+                # Done for this pass (epoch)
+                break
+
+def build_custom_dataloader(
+    cfg,
+    dataset,
+    consumed_samples,
+    mbs,
+    gbs,
+    drop_last=True,
+    pad_samples_to_global_batch_size=False,
+    collate_fn=None,
+    load_gbs=True,
+    use_random_sampler=True,
+    hard_problems_list=None,
+    hard_sample_ratio=0.4 
+):
+    """Buld dataloader given an input dataset."""
+    from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_samplers import (
+        MegatronPretrainingBatchSampler,
+        MegatronPretrainingRandomBatchSampler,
+    )
+
+    from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import (
+        MegatronPretrainingRandomSampler,
+        MegatronPretrainingSampler,
+    )
+
+    combined_dataset = CombinedDataset(dataset, hard_problems_list)
+    logging.info(f"Building dataloader with consumed samples: {consumed_samples}")
+
+    # Common parameters for batch sampler creation
+    common_params = {
+        "total_samples": len(combined_dataset),
+        "consumed_samples": consumed_samples,
+        "micro_batch_size": mbs,
+        "data_parallel_rank": parallel_state.get_data_parallel_rank(),
+        "data_parallel_size": parallel_state.get_data_parallel_world_size(),
+        "drop_last": drop_last,
+        "global_batch_size": gbs,
+        "pad_samples_to_global_batch_size": pad_samples_to_global_batch_size,
+    }
+
+    if use_random_sampler:
+        cls = MegatronPretrainingRandomBatchSampler if load_gbs else MegatronPretrainingRandomSampler
+        common_params["seed"] = cfg.model.seed
+    else:
+        common_params["hard_sample_ratio"] = hard_sample_ratio
+        cls = MegatronPretrainingBatchSampler if load_gbs else MegatronPretrainingDynamicSampler#MegatronPretrainingSampler
+
+    batch_sampler = cls(**common_params)
+
+    return torch.utils.data.DataLoader(
+        combined_dataset,
+        batch_sampler=batch_sampler,
+        num_workers=cfg.model.data.num_workers,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
 
 @hydra_runner(config_path="conf", config_name="gpt_reinforce_actor")
 def main(cfg) -> None:
@@ -123,7 +339,7 @@ def main(cfg) -> None:
     collate_fn = math_collate_with_pad_to_max_batch(max_seqlen, eos_id, cfg, generate_masks_and_position_ids=False)
 
     train_dataloader_builder = partial(
-        build_dataloader,
+        build_custom_dataloader,
         cfg=cfg,
         dataset=train_ds,
         mbs=cfg.model.reinforce.rollout_micro_batch_size,
@@ -134,7 +350,7 @@ def main(cfg) -> None:
     )
 
     val_dataloader_builder = partial(
-        build_dataloader,
+        build_custom_dataloader,
         cfg=cfg,
         dataset=validation_ds,
         mbs=cfg.model.reinforce.val_rollout_micro_batch_size,

@@ -302,8 +302,9 @@ def online_prompt_filtering(rollout_batch, min_threshold=0.2, max_threshold=0.8)
     prompt_tokens = rollout_batch["prompt_tokens"]
     rewards = rollout_batch["rewards"]
 
-    # Find unique prompts
+    # Find unique prompts and their indices
     unique_prompts = torch.unique(prompt_tokens, dim=0)
+    num_samples = prompt_tokens.size(0)
 
     # Initialize for storing statistics
     accuracy_stats = {
@@ -317,6 +318,9 @@ def online_prompt_filtering(rollout_batch, min_threshold=0.2, max_threshold=0.8)
 
     sequence_mask = torch.ones_like(rewards, dtype=torch.bool, device=rewards.device)
 
+    # Initialize per-sample accuracies tensor
+    per_sample_accuracies = torch.zeros(num_samples, device=rewards.device)
+    
     # Calculate accuracy for each unique prompt
     for i in range(len(unique_prompts)):
         # Find all instances of this prompt
@@ -327,6 +331,9 @@ def online_prompt_filtering(rollout_batch, min_threshold=0.2, max_threshold=0.8)
         total = prompt_rewards.size(0)
         correct = prompt_rewards.sum().item()
         accuracy = correct / total
+
+        # Assign per-sample accuracy
+        per_sample_accuracies[is_matching_prompt] = accuracy
 
         # Update accuracy stats
         accuracy_stats['min'] = min(accuracy_stats['min'], accuracy)
@@ -364,4 +371,4 @@ def online_prompt_filtering(rollout_batch, min_threshold=0.2, max_threshold=0.8)
         "prompts_kept": prompts_kept,
     }
 
-    return sequence_mask, accuracy_metrics
+    return sequence_mask, accuracy_metrics, per_sample_accuracies
