@@ -337,6 +337,8 @@ class ReinforceTrainer:
             response_str = self.model.tokenizer.ids_to_text(response_tokens[prompt_length:].tolist())
             problem_hash = hashlib.sha256(problem_str.encode("utf-8")).hexdigest()
             generator_rank = instance["generator_rank"].item()
+            lps = instance["logprobs"][prompt_length:response_length].cpu().tolist()
+            init_lps = instance["init_logprobs"][prompt_length:response_length].cpu().tolist()
 
             record = {
                 "problem_hash": problem_hash,
@@ -351,6 +353,8 @@ class ReinforceTrainer:
                 "reward": reward,
                 "accuracy": instance["accuracy"].item(),
                 "baseline": instance["baseline"].item(),
+                "logprobs": lps,
+                "init_logprobs": init_lps,
             }
             records.append(record)
 
@@ -476,6 +480,8 @@ class ReinforceTrainer:
             seed=self.step,
         )
         balanced_local_batch.update(balanced_rm_batch)
+
+        global_rollout_batch["mask"] = create_mask(values=global_rollout_batch["logprobs"], prompt_lengths=global_rollout_batch["prompt_lengths"], response_lengths=global_rollout_batch["response_lengths"])
 
         global_rollout_batch.update(global_rm_batch)
         rank = torch.distributed.get_rank()
