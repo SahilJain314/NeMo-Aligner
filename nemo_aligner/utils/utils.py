@@ -377,6 +377,7 @@ def math_collate_with_batch_max_sequence_length(
 ):
     """collate function that batches by max sequence length
     """
+    print(f"In math_collate_with_batch_max_sequence_length, data_batch : {data_batch}")
     texts = [item["problem"] for item in data_batch]
     #loss_multipliers = torch.as_tensor([item["loss_multiplier"] for item in data_batch]).view(len(data_batch), 1)
     lengths = torch.as_tensor([item["length"] for item in data_batch])

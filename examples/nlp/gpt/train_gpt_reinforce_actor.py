@@ -72,29 +72,45 @@ class CombinedDataset(Dataset):
         
     def __len__(self):
         # Return the combined length, dynamically adjusts as hard_problems_list changes
-        return len(self.main_dataset) + len(self.hard_problems_list)
+        return len(self.main_dataset) + len(self.hard_samples)
 
     def add_hard_samples(self, hard_samples: List[int]) -> None:
         """Add newly discovered hard samples to the queue."""
         self.hard_samples += hard_samples
+        print(f"hard samples now {self.hard_samples}")
 
     def remove_used_hard_samples(self) -> None:
         """Remove hard samples that have been sampled from the queue."""
         assert len(self.hard_samples) == self.hard_samples_length_at_last_getitem, \
-            "hard_samples length changed since last __getitem__ call. This will make indices incorrect."
+            f"hard_samples length {len(self.hard_samples)} changed since last __getitem__ call ({self.hard_samples_length_at_last_getitem}). This will make indices incorrect."
         self.hard_samples = [x for i, x in enumerate(self.hard_samples) 
                            if i not in self.hard_sample_indices_to_remove]
         self.hard_sample_indices_to_remove = []
 
     def __getitem__(self, idx):
-        if idx < len(self.main_dataset):
-            return self.main_dataset[idx]
-        else:
-            # Fetch from hard problems, adjust index accordingly
-            hard_idx = idx - len(self.main_dataset)
-            self.hard_sample_indices_to_remove.append(hard_idx)
-            self.hard_samples_length_at_last_getitem = len(self.hard_samples)
-            return self.hard_samples[hard_idx]
+        print(f"__getitem__ called on {idx}")
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        if isinstance(idx, list):
+            print(f"Got idx {idx}")
+            if len(idx) == 0:  # Handle empty list case
+                print(f"Returning early {[]}")
+                return []
+            
+            return [self.__getitem__(i) for i in idx]
+        
+        if isinstance(idx, int):
+            if idx < len(self.main_dataset):
+                print(f"returning from main {self.main_dataset[idx]}")
+                return self.main_dataset[idx]
+            else:
+                # Fetch from hard problems, adjust index accordingly
+                hard_idx = idx - len(self.main_dataset)
+                self.hard_sample_indices_to_remove.append(hard_idx)
+                self.hard_samples_length_at_last_getitem = len(self.hard_samples)
+                print(f"returning from hard {self.hard_samples[hard_idx]}")
+                return self.hard_samples[hard_idx]
         
 class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
     """
@@ -132,11 +148,14 @@ class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
             pad_samples_to_global_batch_size=pad_samples_to_global_batch_size,
         )
         self.nb_hard_samples = 0
+        self.regular_data_size = total_samples
         # A ratio [0,1] indicating what fraction of each micro-batch we aim to fill with hard samples
         self.hard_sample_ratio = hard_sample_ratio
 
     def add_nb_hard_samples(self, nb_hard_samples: int) -> None:
+        old_val = self.nb_hard_samples
         self.nb_hard_samples += nb_hard_samples
+        print(f"Adding {nb_hard_samples} hard samples. Before: {old_val}, After: {self.nb_hard_samples}")
         
     def get_start_end_idx(self):
         """
@@ -154,6 +173,7 @@ class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
 
     def __iter__(self) -> Iterable[List[int]]:
         # Normal sample range
+        print(f"\nStarting new iteration with {self.nb_hard_samples} hard samples")
         normal_indices = range(self.consumed_samples, self.total_samples)
 
         # Possibly pad to a global_batch_size if drop_last=False
@@ -174,13 +194,14 @@ class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
 
         while True:
             # 1) Fill the "reserved" portion with hard samples (or as many as the queue has)
-            batch_hard = []
-            if desired_hard_samples <= self.nb_hard_samples:
-                self.nb_hard_samples -= desired_hard_samples
-                batch_hard.append([i for i in range(desired_hard_samples)])
-            else:
-                batch_hard.append([i for i in range(self.nb_hard_samples)])
-                self.nb_hard_samples = 0
+            print(f"hard samples available this iter {self.nb_hard_samples}, can use max {desired_hard_samples}")
+            batch_hard = None
+            # Use as many hard samples as we can
+            if self.nb_hard_samples > 0:
+                num_hard_to_use = min(desired_hard_samples, self.nb_hard_samples)
+                batch_hard = [i + self.regular_data_size for i in range(num_hard_to_use)]
+                self.nb_hard_samples -= num_hard_to_use
+                print(f"Using {num_hard_to_use} hard samples, {self.nb_hard_samples} remaining")
             
             # 2) Fill the remainder with normal samples until total_batch_size is reached
             batch_regular = []
@@ -193,11 +214,17 @@ class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
                     break
 
             # Combine
-            batch = batch_hard + batch_regular
-
+            print(f"hard {batch_hard} regular {batch_regular}")
+            if batch_hard is not None:
+                batch = batch_hard + batch_regular
+            else:
+                batch = batch_regular
+            
+            print(f"This is the current batch {batch}")
             # If we formed a full micro-batch, yield it
             if len(batch) == total_batch_size:
                 start_idx, end_idx = self.get_start_end_idx()
+                print(f"perfect batch : {batch[start_idx:end_idx]}")
                 yield batch[start_idx:end_idx]
                 batch = []
             else:
@@ -209,6 +236,7 @@ class MegatronPretrainingDynamicSampler(BaseMegatronSampler):
                         "encounter partial micro-batches."
                     )
                     start_idx, end_idx = self.get_start_end_idx()
+                    print(f"imperfect batch : {batch[start_idx:end_idx]}")
                     yield batch[start_idx:end_idx]
                 # Done for this pass (epoch)
                 break
@@ -224,7 +252,7 @@ def build_custom_dataloader(
     collate_fn=None,
     load_gbs=True,
     use_random_sampler=True,
-    hard_problems_list=None,
+    hard_problems_list=[],
     hard_sample_ratio=0.4 
 ):
     """Buld dataloader given an input dataset."""

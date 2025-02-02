@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import secrets
-import tensorrt_llm
 import torch
 import torch.distributed
 

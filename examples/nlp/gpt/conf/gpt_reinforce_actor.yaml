@@ -32,7 +32,7 @@ trainer:
     # reduce fragmentation at the cost of using more
     # memory, set to null if we don't want to pad it
     # to a constant size
-    # if actual seq length is higher than this a warning will be raised
+    # if actual seq lenπpgth is higher than this a warning will be raised
     # but will not crash and training will still proceed on the larger
     # sequence length
     rollout_batch_seq_length: null

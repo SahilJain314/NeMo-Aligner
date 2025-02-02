@@ -198,6 +198,7 @@ class ReinforceTrainer:
         
         # compute `max_steps`
         train_dataloader = self.train_dataloader_builder(consumed_samples=0)
+        self.train_dataloader = train_dataloader
         if (not isinstance(train_dataloader.batch_sampler, MegatronPretrainingRandomSampler)) and (
             self.cfg.max_epochs is not None and self.cfg.max_epochs > 1
         ):
@@ -367,11 +368,12 @@ class ReinforceTrainer:
                             rollout_batch["prompt_tokens"] = batch["problem"]
                             rollout_batch["generator_rank"] = torch.ones(batch["problem"].shape[0]) * parallel_state.get_model_parallel_src_rank()
                             # Include the original batch input data directly into the rollout_batch
-                            rollout_batch["training_data"] = {}
+                            # rollout_batch["training_data"] = {}
                             for k, v in batch.items():
-                                assert k not in rollout_batch["training_data"]
-                                rollout_batch["training_data"][k] = v
-                            
+                                new_k = "training_data_" + str(k)
+                                print(f"new_k = {new_k}")
+                                rollout_batch[new_k] = v
+                                
                             futures.append(self.rm.infer_rm(rollout_batch))
                             #del rollout_batch["ground_truths"]
                             del rollout_batch["response_sentences"]
@@ -381,10 +383,12 @@ class ReinforceTrainer:
                         rollout_batch = self.model.infer(batch)
                         rollout_batch["prompt_tokens"] = batch["problem"]
                         rollout_batch["generator_rank"] = torch.ones(batch["problem"].shape[0]) * parallel_state.get_model_parallel_src_rank()
-                        rollout_batch["training_data"] = {}
-                        for k, v in batch.items():
-                            assert k not in rollout_batch["training_data"]
-                            rollout_batch["training_data"][k] = v
+                        # for k, v in batch.items():
+                        #     # assert k not in rollout_batch["training_data"]
+                        #     # rollout_batch["training_data"][k] = v
+                        #     new_k = "training_data_" + str(k)
+                        #     rollout_batch[new_k] = v
+
                         futures.append(self.rm.infer_rm(rollout_batch))
                         #del rollout_batch["ground_truths"]
                         del rollout_batch["response_sentences"]
@@ -515,8 +519,8 @@ class ReinforceTrainer:
         rollout_batch, rollout_metrics = self._run_inference(
             self.train_dataloader_builder, consumed_samples=self.consumed_samples // self.cfg.num_rollouts_per_prompt, is_validation=False
         )
-        print(f"Removing {len(self.train_dataloader_builder.dataset.hard_sample_indices_to_remove)} samples from hard samples.")
-        self.train_dataloader_builder.dataset.remove_used_hard_samples()
+        print(f"Removing {len(self.train_dataloader.dataset.hard_sample_indices_to_remove)} samples from hard samples.")
+        self.train_dataloader.dataset.remove_used_hard_samples()
         
         # Filter the prompts based on the accuracy with the current policy.
         sequence_mask, accuracy_metrics, per_sample_accuracies = online_prompt_filtering(
@@ -526,19 +530,26 @@ class ReinforceTrainer:
         )
         rollout_batch["prompt_mask"] = sequence_mask
         
-        hard_problem_accuracy_threshold = self.cfg.trainer.reinforce.hard_problem_accuracy_threshold
+        hard_problem_accuracy_threshold = self.cfg.hard_problem_accuracy_threshold
         # Iterate over the per-sample accuracies to identify hard problems
         problems = []        
+        prefix = "training_data_"
         for idx, sample_accuracy in enumerate(per_sample_accuracies):
             if sample_accuracy <= hard_problem_accuracy_threshold:
                 # Extract the individual problem data
-                problem = rollout_batch[idx]["training_data"]
-                if problem not in problems:
+                prefix_keys = [k for k in list(rollout_batch.keys()) if k.startswith(prefix)]
+                problem = {}
+                for k in prefix_keys:
+                    problem[k[len(prefix):]] = rollout_batch[k][idx]
+
+                #if len(list(problem.keys())) > 0 and problem not in problems:
+                #if len(list(problem.keys())) > 0 and not any(p['problem'] == problem['problem'] for p in problems):   
+                if len(list(problem.keys())) > 0 and not any(torch.equal(p['problem'], problem['problem']) for p in problems):
                     problems.append(problem)
         
         print(f"Adding {len(problems)} to the hard samples.")
-        self.train_dataloader_builder.batch_sampler.add_nb_hard_samples(len(problems))
-        self.train_dataloader_builder.dataset.add_hard_samples(problems)
+        self.train_dataloader.batch_sampler.add_nb_hard_samples(len(problems))
+        self.train_dataloader.dataset.add_hard_samples(problems)
         
         # Perform distributed all-reduce on the metrics with specified operations
         ops = {
