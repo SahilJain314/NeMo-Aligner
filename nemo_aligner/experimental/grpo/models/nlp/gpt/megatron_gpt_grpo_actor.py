@@ -103,9 +103,15 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
         """
         Dynamically initialize the appropriate inference backend based on the backend type.
         """
-        if backend_type == "trt_llm":
+        if backend_type == "flask":
+            from nemo_aligner.experimental.grpo.inference.flask.flask_backend import FlaskInferenceBackend
+            backend = FlaskInferenceBackend(
+                model_cfg=self.cfg,
+                tokenizer=self.tokenizer,
+                server_url=self.cfg.grpo.inference_backend.config.flask.get("url", "http://localhost:5000")
+            )
+        elif backend_type == "trt_llm":
             from nemo_aligner.utils.trt_llm import GPTGenerateTRTLLM
-
             backend = GPTGenerateTRTLLM(
                 model_cfg=self.cfg,
                 max_generation_length=self.cfg.grpo.length_params.get("max_length", 1024),

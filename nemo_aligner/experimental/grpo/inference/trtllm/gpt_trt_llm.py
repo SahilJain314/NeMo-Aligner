@@ -33,7 +33,7 @@ except (ImportError, ModuleNotFoundError) as e:
     HAVE_TRTLLM = False
 
 
-class GPTGenerateTRTLLM:
+class GPTGenerateTRTLLM(InferenceBackendBase):
     # Use a reserved negative number since there is variation between tokenizers if
     #  they (1) have a pad_id (2) don't have a pad_id or (3) have None as the pad_id.
     #  This pad_id is replaced with eos_id after generation.
