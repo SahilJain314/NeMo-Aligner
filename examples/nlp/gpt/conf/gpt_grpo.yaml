@@ -53,7 +53,7 @@ trainer:
 
     # Speed-up training by accelerating inference stage using backends like TRT-LLM, vLLM
     inference_backend:
-      type: trt_llm  # Can be 'trt_llm', 'trt_llm_pytorch', 'sglang', 'vllm'.
+      type: trt_llm_pytorch  # Can be 'trt_llm', 'trt_llm_pytorch', 'sglang', 'vllm'.
       
       # Common settings for all backends
       enable: True
@@ -68,9 +68,14 @@ trainer:
         # TRTLLM-specific options
         trt_llm:
           # for supported values see: https://github.com/NVIDIA/NeMo/blob/db6244857af3b012f645c7f4672522978bb608b1/nemo/export/trt_llm/converter/utils.py#L26
-          enable: True
+          enable: False
           model_type: llama  # Can be gptj, gptnext, llama, gemma, falcon
           unload_engine_train: False
+
+        trt_llm_pytorch:
+          # for supported values see: https://github.com/NVIDIA/NeMo/blob/db6244857af3b012f645c7f4672522978bb608b1/nemo/export/trt_llm/converter/utils.py#L26
+          enable: True
+          model_type: llama  # Can be gptj, gptnext, llama, gemma, falcon
 
     batch_iterator:
       # When use_flask is True, we will spawn a flask server on rank 0 to balance the work of policy rollouts.

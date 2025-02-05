@@ -130,6 +130,26 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
                 seed=self.cfg.grpo.inference_backend.get("seed", self.cfg.seed),
                 trt_model_dir=self.cfg.grpo.get("trt_model_dir", "/tmp/trt_llm_model"),
             )
+        elif backend_type == "trt_llm_pytorch":
+            from nemo_aligner.experimental.grpo.inference.trtllm_pytorch.gpt_trt_llm_torch import GPTGenerateTRTLLMPytorch
+            backend = GPTGenerateTRTLLMPytorch(
+                model_cfg=self.cfg,
+                max_generation_length=self.cfg.grpo.length_params.get("max_length", 1024),
+                max_input_len=self.cfg.grpo.inference_backend.get("max_input_len", 1024),
+                generation_batch_size=self.cfg.grpo.get("generation_rollout_mbs", 4),
+                unload_engine_train=False,#self.cfg.grpo.inference_backend.config.trt_llm_pytorch.get("unload_engine_train", False),
+                trt_model_type=self.cfg.grpo.inference_backend.config.trt_llm_pytorch.get("model_type", "llama"),
+                end_strings=self.cfg.grpo.sampling_params["end_strings"],
+                reshard_model=self.cfg.grpo.inference_backend.get("reshard", False),
+                sample_temperature=self.cfg.grpo.sampling_params["temperature"],
+                sample_top_k=self.cfg.grpo.sampling_params["top_k"],
+                sample_top_p=self.cfg.grpo.sampling_params["top_p"],
+                repetition_penalty=self.cfg.grpo.sampling_params["repetition_penalty"],
+                use_greedy=self.cfg.grpo.sampling_params.get("use_greedy", False),
+                tokenizer=self.tokenizer,
+                seed=self.cfg.grpo.inference_backend.get("seed", self.cfg.seed),
+                trt_model_dir=self.cfg.grpo.get("trt_model_dir", "/tmp/trt_llm_model"),  
+            )
         else:
             raise ValueError(f"Unsupported inference backend: {backend_type}")
 
