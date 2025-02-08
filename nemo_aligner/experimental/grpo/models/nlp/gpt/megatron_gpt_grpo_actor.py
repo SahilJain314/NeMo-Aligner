@@ -65,6 +65,8 @@ from nemo_aligner.utils.utils import (
 from nemo_aligner.experimental.grpo.inference.registry import get_backend, list_available_backends
 from nemo_aligner.experimental.grpo.models.nlp.gpt import conversion_dict as CONVERTER
 
+CHECKPOINT_PATH="/dev/shm/checkpoint_hf"
+
 class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGenerativeInterface):
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer=trainer)
@@ -134,7 +136,7 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
             backend = VLLMClient(
                 self.cfg.grpo.inference_backend.config.vllm,
                 tokenizer=self.tokenizer,
-                checkpoint_path='/dev/shm/checkpoint_hf',
+                checkpoint_path=CHECKPOINT_PATH,
             )
         elif backend_type == "trt_llm_pytorch":
 
@@ -142,7 +144,7 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
             backend = TRTLLMPytorchClient(
                 self.cfg.grpo.inference_backend.config.trt_llm_pytorch,
                 tokenizer=self.tokenizer,
-                checkpoint_path='/dev/shm/checkpoint_hf',
+                checkpoint_path=CHECKPOINT_PATH,
             )
         else:
             raise ValueError(f"Unsupported inference backend: {backend_type}")
@@ -348,7 +350,7 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
         
         # testing sync and save to cpu ramdisk
         start_time = time.time()
-        out_dir = "/dev/shm/checkpoint_hf/"
+        out_dir = CHECKPOINT_PATH
         source_hf_jsons_dir = "/opt/checkpoints/hf_jsons/"
         os.makedirs(out_dir, exist_ok=True)
         # os.chmod(out_dir, 0o777)
@@ -517,7 +519,9 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
         self._restore_sequence_parallelism_args()
 
         if self.inference_backend:
-            self.inference_backend.free()
+            from nemo_aligner.experimental.grpo.inference.vllm.vllm_client import VLLMClient
+            if not isinstance(self.inference_backend, VLLMClient):
+                self.inference_backend.free()
 
 
         set_train(self)

@@ -54,6 +54,7 @@ class VLLMClient:
         self.pad_id = VLLMClient.DEFAULT_PAD_ID
         self.eos_id = tokenizer.eos_id
         self.checkpoint_path = checkpoint_path
+        self.start = False
         self.cpu_mp_gloo_group = None
         
     def build_cpu_mp_gloo_group(self):
@@ -102,20 +103,37 @@ class VLLMClient:
         """
         ret_val = None
         if torch.distributed.get_rank() == parallel_state.get_model_parallel_src_rank():
-            url = f"{self.base_url}/start"
-            try:
-                data = {
-                    "checkpoint_path": self.checkpoint_path,
-                    "tp": parallel_state.get_tensor_model_parallel_world_size(),
-                    "tp_src_gpu_idx": torch.cuda.current_device(),
-                }
-                response = requests.post(url, json=data)
-                response.raise_for_status()
-                data = response.json()
-                print(f"Start response: {data}")
-                ret_val = data
-            except requests.exceptions.RequestException as e:
-                print(f"Error starting the server: {e}")
+            if not self.start:
+                url = f"{self.base_url}/start"
+                try:
+                    data = {
+                        "checkpoint_path": self.checkpoint_path,
+                        "tp": parallel_state.get_tensor_model_parallel_world_size(),
+                        "tp_src_gpu_idx": torch.cuda.current_device(),
+                    }
+                    response = requests.post(url, json=data)
+                    response.raise_for_status()
+                    data = response.json()
+                    print(f"Start response: {data}")
+                    ret_val = data
+                except requests.exceptions.RequestException as e:
+                    print(f"Error starting the server: {e}")
+                self.start = True
+            else:
+                checkpoint_path = model if isinstance(model, str) else self.checkpoint_path
+                url = f"{self.base_url}/refit"
+                try:
+                    data = {
+                        "checkpoint_path": checkpoint_path,
+                    }
+                    response = requests.post(url, json=data)
+                    response.raise_for_status()
+                    data = response.json()
+                    print(f"refit response: {data}")
+                    ret_val = data
+                except requests.exceptions.RequestException as e:
+                    print(f"Error starting the server: {e}")
+
         torch.distributed.barrier(group=parallel_state.get_model_parallel_group())
         return ret_val
 
@@ -133,7 +151,7 @@ class VLLMClient:
             for idx in range(prompt_tokens.shape[0]):
                 batch_input_ids.append(prompt_tokens[idx][0 : prompt_lengths[idx]].cpu().tolist())
 
-            url = f"{self.base_url}/generate"
+            url = f"{self.base_url}/generate" if not use_greedy else f"{self.base_url}/generate_greedy"
             # retry sending requests until it works
             response_success = False
             retry_ctr=0
