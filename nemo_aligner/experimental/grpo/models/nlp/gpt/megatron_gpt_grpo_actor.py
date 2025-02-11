@@ -25,6 +25,7 @@ from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.utils import divide
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
+from safetensors.torch import save_file
 
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
@@ -362,10 +363,18 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
             raise
 
         torch.distributed.barrier()
+        
+        # testing sync and save to cpu ramdisk
+        # start_time = time.time()
+        # out_dir = "/dev/shm/checkpoint_hf/"
+        # source_hf_jsons_dir = "/opt/checkpoints/hf_jsons/"
+        # os.makedirs(out_dir, exist_ok=True)
 
         class SafeDict(dict):
             def __missing__(self, key):
                 return '{' + key + '}'
+
+        cpu_param_dict = {}
 
         with torch.no_grad():
             for idx, (name, param) in enumerate(self.state_dict().items()):
@@ -419,6 +428,8 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
                             except:
                                 pass
                         raise
+                    # print(f"CONVERTED {name} with out shape {[(n, v.shape) for n, v in hf_name_param_mapping.items()]}")
+                    # cpu_param_dict.update({k: v.cpu() for k, v in hf_name_param_mapping.items()})
 
             # Copy HF jsons to CPU ramdisk with proper permissions
             if torch.cuda.current_device() == 0:
@@ -431,12 +442,24 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
                 except Exception as e:
                     print(f"Error copying HF json files: {e}", flush=True)
                     raise
+                    
+                # try:
+                #     path = os.path.join(out_dir, "params.safetensors")
+                #     save_file(cpu_param_dict, path)
+                #     os.chmod(path, 0o666)
+                # except Exception as e:
+                #     print(f"Error saving params.safetensors: {e}", flush=True)
+                #     if os.path.exists(path):
+                #         try:
+                #             os.remove(path)
+                #         except:
+                #             pass
+                #     raise
 
         torch.distributed.barrier()
         print(f"MP group: {parallel_state.get_model_parallel_group()}", flush=True)
         torch.distributed.barrier()
         print(f'TIME TO SAVE {time.time() - start_time}', flush=True)
-        # time.sleep(10000) # everyone seems together here
 
         if self.inference_backend:
             # Refitting or recompiling the inference model for generation

@@ -257,10 +257,12 @@ class SequenceRewardRolloutGenerator(RolloutGeneratorInterface):
             instance = dict_get(rollout_batch, i)
             response_length = instance["response_lengths"].item()
             prompt_length = instance["prompt_lengths"].item()
-            logprobs = instance["logprobs"][prompt_length-1:response_length-1]
-            trt_lps = instance["response_trt_lps"][prompt_length:response_length]
-            error = torch.sum(torch.exp(torch.abs(logprobs - trt_lps)))
-            sum_trt_error += error.item()
+            # TODO: @pchadha fix TRT-LLM Pytorch logprobs
+            # logprobs = instance["logprobs"][prompt_length-1:response_length-1]
+            # trt_lps = instance["response_trt_lps"][prompt_length:response_length]
+            # print(f"response_trt_lps: {instance['response_trt_lps'].shape}, logprobs: {instance['logprobs'].shape}, prompt_length: {prompt_length}, response_length: {response_length}")
+            # error = torch.sum(torch.exp(torch.abs(logprobs - trt_lps)))
+            # sum_trt_error += error.item()
             num_toks += response_length - prompt_length
 
         metrics = {
@@ -269,7 +271,7 @@ class SequenceRewardRolloutGenerator(RolloutGeneratorInterface):
             "generation_length": (response_lengths - prompt_lengths).float().mean().item(),
             "rewards": rewards.mean().item(),
             "fraction_of_samples_properly_ended": is_end.float().mean().item(),
-            "trt_logprob_error": sum_trt_error / num_toks,
+            # "trt_logprob_error": sum_trt_error / num_toks,
         }
 
         return metrics
@@ -316,7 +318,7 @@ class SequenceRewardRolloutGenerator(RolloutGeneratorInterface):
                 "ended_correctly": instance["is_end"].item(),
                 "reward": instance["rewards"].item(),
                 "logprobs": lps,
-                "trt_lps": instance["response_trt_lps"][prompt_length:response_length].cpu().tolist(),
+                # "trt_lps": instance["response_trt_lps"][prompt_length:response_length].cpu().tolist(),
                 "init_logprobs": init_lps,
                 "generation_tokens": generation_tokens,
             }
