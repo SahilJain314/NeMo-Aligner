@@ -190,6 +190,7 @@ import gc
 
 from tensorrt_llm._torch import LLM
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
+from tensorrt_llm.llmapi import KvCacheConfig
 
 class TRTLLMPytorchInferenceServer:
     def __init__(self) -> None:
@@ -197,19 +198,28 @@ class TRTLLMPytorchInferenceServer:
         self.llm = None
     
     def start(self, path, tp):
+        for i in range(torch.cuda.device_count()):
+            print(f"before start: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+
         if self.llm is None:
             print(f"starting llm server")
             pytorch_config = PyTorchConfig(
                 use_cuda_graph=False,
+                # attn_backend = 'VANILLA',
             )
-
-            self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config)
+            # self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0., enable_block_reuse=False))
+            self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.8, enable_block_reuse=True))
             self.running = True
         else:
             self.llm.load_model(path)
         print(f"TRTLLM Pytorch inference server started.", flush=True)
+        for i in range(torch.cuda.device_count()):
+            print(f"afterstart: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
 
     def shutdown(self):
+        for i in range(torch.cuda.device_count()):
+            print(f"before shutdown: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+
         # self.llm.shutdown()
         # del self.llm
         # gc.collect()
@@ -217,19 +227,27 @@ class TRTLLMPytorchInferenceServer:
         # self.running = False
         self.llm.free_gpu_resources()
         print("TRTLLM Pytorch gpu resources freed.", flush=True)
+        # print the current memory usage for all GPUs
+        for i in range(torch.cuda.device_count()):
+            print(f"after shutdown: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
 
     def generate(self, batch_tokens):
         from tensorrt_llm import SamplingParams
         from tensorrt_llm.inputs.data import TokensPrompt
 
+        for i in range(torch.cuda.device_count()):
+            print(f"before generate: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+
+
         sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            max_tokens=2048,
+            # max_tokens=8192,
             return_log_probs=True,
         )
 
         prompt_tokens = [TokensPrompt(prompt_token_ids=tok_seq) for tok_seq in batch_tokens]
+        print(len(prompt_tokens))
         outputs = self.llm.generate(prompt_tokens, sampling_params, use_tqdm=True)
         logprobs = []
         out_tokens = []
@@ -238,6 +256,9 @@ class TRTLLMPytorchInferenceServer:
             out_toks = output.outputs[0].token_ids
             logprobs.append(lps)
             out_tokens.append(out_toks)
+
+        for i in range(torch.cuda.device_count()):
+            print(f"generate: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
 
         return out_tokens, logprobs
 
