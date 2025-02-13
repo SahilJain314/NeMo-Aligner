@@ -196,6 +196,7 @@ class TRTLLMPytorchInferenceServer:
     def __init__(self) -> None:
         self.running = False
         self.llm = None
+        self.max_seq_len = None
     
     def start(self, path, tp):
         for i in range(torch.cuda.device_count()):
@@ -208,6 +209,12 @@ class TRTLLMPytorchInferenceServer:
                 # attn_backend = 'VANILLA',
             )
             # self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0., enable_block_reuse=False))
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(path)
+            self.max_seq_len = tokenizer.model_max_length
+            print(f"Max seq len of model is {self.max_seq_len}")
+
+
             self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.8, enable_block_reuse=True))
             self.running = True
         else:
@@ -239,10 +246,11 @@ class TRTLLMPytorchInferenceServer:
             print(f"before generate: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
 
 
+        assert self.max_seq_len is not None, "Max seq len is not set"
         sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            # max_tokens=8192,
+            max_tokens=self.max_seq_len,
             return_log_probs=True,
         )
 
