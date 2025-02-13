@@ -187,20 +187,34 @@ app = Flask(__name__)
 inference_server = None
 import torch
 import gc
+import subprocess
 
+import threading
 from tensorrt_llm._torch import LLM
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import KvCacheConfig
+
+
+# Global lock to guard all API accesses
+api_lock = threading.Lock()
 
 class TRTLLMPytorchInferenceServer:
     def __init__(self) -> None:
         self.running = False
         self.llm = None
         self.max_seq_len = None
-    
+        self.end_id = None
+        self.pad_id = None
+
+    def get_gpu_memory_usage(self):
+        command = "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits"
+        memory_used = subprocess.check_output(command.split()).decode('ascii').split('\n')[:-1]
+        for idx, mem in enumerate(memory_used):
+            print(f"GPU {idx} using {mem} GB", flush=True)
+
+
     def start(self, path, tp):
-        for i in range(torch.cuda.device_count()):
-            print(f"before start: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+        self.get_gpu_memory_usage()
 
         if self.llm is None:
             print(f"starting llm server")
@@ -212,20 +226,21 @@ class TRTLLMPytorchInferenceServer:
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(path)
             self.max_seq_len = tokenizer.model_max_length
+            self.end_id = tokenizer.eos_token_id
+            self.pad_id = tokenizer.pad_token_id
             print(f"Max seq len of model is {self.max_seq_len}")
+            print(f"End id of model is {self.end_id}")
+            print(f"Pad id of model is {self.pad_id}")
 
-
-            self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.8, enable_block_reuse=True))
+            self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.7, enable_block_reuse=True))
             self.running = True
         else:
             self.llm.load_model(path)
         print(f"TRTLLM Pytorch inference server started.", flush=True)
-        for i in range(torch.cuda.device_count()):
-            print(f"afterstart: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+        self.get_gpu_memory_usage()
 
     def shutdown(self):
-        for i in range(torch.cuda.device_count()):
-            print(f"before shutdown: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+        self.get_gpu_memory_usage()
 
         # self.llm.shutdown()
         # del self.llm
@@ -235,23 +250,25 @@ class TRTLLMPytorchInferenceServer:
         self.llm.free_gpu_resources()
         print("TRTLLM Pytorch gpu resources freed.", flush=True)
         # print the current memory usage for all GPUs
-        for i in range(torch.cuda.device_count()):
-            print(f"after shutdown: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+        self.get_gpu_memory_usage()
 
     def generate(self, batch_tokens):
         from tensorrt_llm import SamplingParams
         from tensorrt_llm.inputs.data import TokensPrompt
 
-        for i in range(torch.cuda.device_count()):
-            print(f"before generate: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+        self.get_gpu_memory_usage()
 
 
         assert self.max_seq_len is not None, "Max seq len is not set"
+        assert self.end_id is not None, "End id is not set"
         sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            max_tokens=self.max_seq_len,
+            max_tokens=4096, #self.max_seq_len,
+            detokenize=False,
             return_log_probs=True,
+            end_id=self.end_id,
+            pad_id=self.pad_id,
         )
 
         prompt_tokens = [TokensPrompt(prompt_token_ids=tok_seq) for tok_seq in batch_tokens]
@@ -265,67 +282,69 @@ class TRTLLMPytorchInferenceServer:
             logprobs.append(lps)
             out_tokens.append(out_toks)
 
-        for i in range(torch.cuda.device_count()):
-            print(f"generate: Current memory usage for GPU {i}: {torch.cuda.memory_allocated(i) / 1024**2} MB", flush=True)
+        self.get_gpu_memory_usage()
 
         return out_tokens, logprobs
 
 @app.route('/start', methods=['POST'])
 def start_server():
     global inference_server
-    print(f"start call", flush=True)
-    data = request.get_json()
+    with api_lock:
+        print(f"start call", flush=True)
+        data = request.get_json()
 
-    if inference_server is None:
-        print(f"First time start code path", flush=True)
-        inference_server = TRTLLMPytorchInferenceServer()
-        inference_server.start(data["checkpoint_path"], data["tp"])
-        return jsonify({"status": "started"}), 200
-    else:
-        print(f"Refit code path", flush=True)
-        inference_server.start(data["checkpoint_path"], data["tp"])
-        return jsonify({"status": "started"}), 200
+        if inference_server is None:
+            print(f"First time start code path", flush=True)
+            inference_server = TRTLLMPytorchInferenceServer()
+            inference_server.start(data["checkpoint_path"], data["tp"])
+            return jsonify({"status": "started"}), 200
+        else:
+            print(f"Refit code path", flush=True)
+            inference_server.start(data["checkpoint_path"], data["tp"])
+            return jsonify({"status": "started"}), 200
 
 @app.route('/shutdown', methods=['POST'])
 def shutdown_server():
     global inference_server
-    print(f"shutdown call", flush=True)
-    inference_server.shutdown()
-    return jsonify({"status": "shutdown complete"}), 200
+    with api_lock:
+        print(f"shutdown call", flush=True)
+        inference_server.shutdown()
+        return jsonify({"status": "shutdown complete"}), 200
 
 @app.route('/generate', methods=['POST'])
 def generate():
     global inference_server
-    print(f"Generate call", flush=True)
-    
-    if inference_server is None or not inference_server.running:
-        return jsonify({"error": "inference server not running"}), 400
+    with api_lock:
+        print(f"Generate call", flush=True)
+        
+        if inference_server is None or not inference_server.running:
+            return jsonify({"error": "inference server not running"}), 400
 
 
-    import time
-    start_time = time.time()
-    data = request.get_json()
-    end_time = time.time()
-    print(f"Request get_json time: {end_time - start_time} seconds", flush=True)
-    if not isinstance(data, list):
-        return jsonify({"error": "Expected a list of lists of tokens"}), 400
+        import time
+        start_time = time.time()
+        data = request.get_json()
+        end_time = time.time()
+        print(f"Request get_json time: {end_time - start_time} seconds", flush=True)
+        if not isinstance(data, list):
+            return jsonify({"error": "Expected a list of lists of tokens"}), 400
 
-    for i, item in enumerate(data):
-        if not isinstance(item, list):
-            return jsonify({"error": f"Element at index {i} is not a list"}), 400
+        for i, item in enumerate(data):
+            if not isinstance(item, list):
+                return jsonify({"error": f"Element at index {i} is not a list"}), 400
 
-    generations, logprobs = inference_server.generate(data)
-    response = {
-        "response_tokens": generations,
-        "response_logprobs": logprobs
-    }
+        generations, logprobs = inference_server.generate(data)
+        response = {
+            "response_tokens": generations,
+            "response_logprobs": logprobs
+        }
 
-    import time
-    start_time = time.time()
-    response = jsonify(response), 200
-    end_time = time.time()
-    print(f"Response jsonify time: {end_time - start_time} seconds", flush=True)
-    return response
+        import time
+        start_time = time.time()
+        response = jsonify(response), 200
+        end_time = time.time()
+        print(f"Response jsonify time: {end_time - start_time} seconds", flush=True)
+        return response
 
 if __name__ == '__main__':
     # Run the Flask app
