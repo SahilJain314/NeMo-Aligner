@@ -220,6 +220,8 @@ class TRTLLMPytorchInferenceServer:
             print(f"starting llm server")
             pytorch_config = PyTorchConfig(
                 use_cuda_graph=False,
+                use_rl_temporary_decoder=True,
+                enable_iter_perf_stats=False,
                 # attn_backend = 'VANILLA',
             )
             # self.llm = LLM(model=path, tensor_parallel_size=tp, pytorch_backend_config=pytorch_config, kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0., enable_block_reuse=False))
@@ -264,20 +266,36 @@ class TRTLLMPytorchInferenceServer:
         sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            max_tokens=4096, #self.max_seq_len,
+            max_tokens=2048, #self.max_seq_len,
             detokenize=False,
-            return_log_probs=True,
+            # return_log_probs=True,
+            return_generation_logits=True,
             end_id=self.end_id,
             pad_id=self.pad_id,
         )
 
         prompt_tokens = [TokensPrompt(prompt_token_ids=tok_seq) for tok_seq in batch_tokens]
-        print(len(prompt_tokens))
+        print(len(prompt_tokens), flush=True)
         outputs = self.llm.generate(prompt_tokens, sampling_params, use_tqdm=True)
         logprobs = []
         out_tokens = []
+
+        # def compute_logprobs(generation_logits, token_ids):
+        #     log_probs = torch.log_softmax(generation_logits, dim=-1)  # [seq_len, vocab_size]
+        #     if isinstance(token_ids, list):
+        #         token_ids = torch.tensor(token_ids, device=log_probs.device)
+        #     seq_indices = torch.arange(len(token_ids), device=log_probs.device)
+        #     selected_logprobs = log_probs[seq_indices, token_ids]  # [seq_len]    
+        #     return selected_logprobs
+
         for output in outputs:
-            lps = output.outputs[0].logprobs
+            # print(output.outputs[0].token_ids, flush=True)
+            #lps = output.outputs[0].logprobs
+            # generation logits
+            generation_logits = output.outputs[0].generation_logits
+            # logprobs from generation logits
+            # lps = compute_logprobs(generation_logits, output.outputs[0].token_ids)
+            lps = generation_logits.tolist()
             out_toks = output.outputs[0].token_ids
             logprobs.append(lps)
             out_tokens.append(out_toks)
