@@ -55,6 +55,9 @@ trainer:
     # Speed-up training by accelerating inference stage using backends like TRT-LLM, vLLM
     inference_backend:
       type: trt_llm  # Can be 'trt_llm', 'trt_llm_pytorch', 'sglang', 'vllm'.
+
+      # Controls which converter to use
+      converter_type: 'llama'  # llama
       
       # Common settings for all backends
       enable: True

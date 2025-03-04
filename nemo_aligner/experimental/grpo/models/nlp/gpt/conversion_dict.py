@@ -15,6 +15,7 @@
 import torch 
 import einops
 
+from functools import partial
 from nemo_aligner.experimental.grpo.utils import parallel_state
 
 def get_local_layer_num(s):
@@ -40,7 +41,7 @@ def get_global_layer_num(s, cfg):
     return global_layer_num
 
 
-def split_qkv_llama(gathered_mcore_qkv_layer, cfg):
+def split_qkv_llama(gathered_mcore_qkv_layer, cfg, hf_key_prefix):
     hidden_size = cfg.hidden_size
     head_num = cfg.num_attention_heads
     num_query_groups = cfg.get("num_query_groups", head_num)  # different num_query_groups for 70B
@@ -70,9 +71,9 @@ def split_qkv_llama(gathered_mcore_qkv_layer, cfg):
     ## k_slice = [8, 18, 28, ... 68, 78]
     ## v_slice = [9, 19, 29, ... 69, 79]
 
-    q_name = 'model.layers.{gl}.self_attn.q_proj.weight'
-    k_name = 'model.layers.{gl}.self_attn.k_proj.weight'
-    v_name = 'model.layers.{gl}.self_attn.v_proj.weight'
+    q_name = f'{hf_key_prefix}.q_proj.weight'
+    k_name = f'{hf_key_prefix}.k_proj.weight'
+    v_name = f'{hf_key_prefix}.v_proj.weight'
     q = qkv_weights[q_slice].reshape(-1, hidden_size)
     k = qkv_weights[k_slice].reshape(-1, hidden_size)
     v = qkv_weights[v_slice].reshape(-1, hidden_size)
@@ -99,10 +100,14 @@ mcore_te_to_hf_llama = {
     'model.decoder.final_layernorm.weight': {"hf": "model.norm.weight"},
     'model.output_layer.weight': {"tp": 0, "hf":"lm_head.weight"},
     'model.decoder.layers.{l}.self_attention.linear_proj.weight': {"tp":1, "hf":"model.layers.{gl}.self_attn.o_proj.weight"},
-    'model.decoder.layers.{l}.self_attention.linear_qkv.weight': {"tp":0, "hf_func": split_qkv_llama},
+    'model.decoder.layers.{l}.self_attention.linear_qkv.weight': {"tp":0, "hf_func": partial(split_qkv_llama, hf_key_prefix='model.layers.{gl}.self_attn')},
     'model.decoder.layers.{l}.self_attention.linear_qkv.layer_norm_weight': {"hf": "model.layers.{gl}.input_layernorm.weight"},
     'model.decoder.layers.{l}.mlp.linear_fc1.weight': {"tp": 0, "hf_func": split_fc1_gate_down_llama},
     'model.decoder.layers.{l}.mlp.linear_fc1.layer_norm_weight': {"hf": "model.layers.{gl}.post_attention_layernorm.weight"},
     'model.decoder.layers.{l}.mlp.linear_fc2.weight': {"tp": 1, "hf": "model.layers.{gl}.mlp.down_proj.weight"},
 }
 
+
+CHECKPOINT_MAPPINGS = {
+    'llama': mcore_te_to_hf_llama,
+}

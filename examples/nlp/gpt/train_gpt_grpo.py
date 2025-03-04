@@ -17,6 +17,7 @@ import torch
 import torch.multiprocessing as mp
 from megatron.core.utils import divide
 from omegaconf.omegaconf import OmegaConf
+from hydra.utils import get_class
 
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
@@ -27,7 +28,7 @@ from nemo_aligner.data.nlp.builders import (
 )
 from nemo_aligner.experimental.grpo.data.builders import build_train_valid_test_task_datasets, environment_collate_with_pad_to_max_batch, build_dataloader
 from nemo_aligner.experimental.grpo.data.datasets import AllTaskDataset
-from nemo_aligner.experimental.grpo.models.nlp.gpt.megatron_gpt_grpo_actor import MegatronGPTActorModel
+from nemo_aligner.experimental.grpo.models.nlp.gpt.megatron_gpt_grpo_actor import MegatronGPTActorModel, MegatronMambaActorModel, MegatronMambaModel
 from nemo_aligner.experimental.grpo.experience.environments.math_environment import MathEnvironment
 from nemo_aligner.experimental.grpo.experience.rollout_generator import SequenceRewardRolloutGenerator
 from nemo_aligner.utils import parallel_state
@@ -56,7 +57,7 @@ mp.set_start_method("spawn", force=True)
 
 @hydra_runner(config_path="conf", config_name="gpt_grpo")
 def main(cfg) -> None:
-    cfg.model = load_and_override_model_config(cfg.pretrained_checkpoint.restore_from_path, cfg.model)
+    cfg.model, target = load_and_override_model_config(cfg.pretrained_checkpoint.restore_from_path, cfg.model, return_target=True)
 
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f"\n{OmegaConf.to_yaml(cfg)}")
@@ -67,8 +68,12 @@ def main(cfg) -> None:
 
     logger = CustomLoggerWrapper(trainer.loggers)
 
+    actor_model_cls = MegatronGPTActorModel
+    if target and issubclass(get_class(target), MegatronMambaModel):
+        actor_model_cls = MegatronMambaActorModel
+
     ptl_model = load_from_nemo(
-        MegatronGPTActorModel,
+        actor_model_cls,
         cfg.model,
         trainer,
         strict=True,
@@ -105,6 +110,7 @@ def main(cfg) -> None:
             cfg.model.data.data_prefix[split][0],
             ptl_model.tokenizer,
             cfg.model.data.apply_chat_template,
+            cfg.model.data.get('chat_prompt_tokens', None),
             cfg.model.data.system_prompt_file,
             cfg.model.data.prompt_file,
             seq_length=cfg.model.data.seq_length,

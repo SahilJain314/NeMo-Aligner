@@ -23,6 +23,7 @@ from megatron.core.utils import divide
 from omegaconf.dictconfig import DictConfig
 
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+from nemo.collections.nlp.models.language_modeling.megatron_mamba_model import MegatronMambaModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
     get_iterator_k_split,
@@ -44,7 +45,7 @@ from nemo_aligner.utils.train_utils import (
 from nemo_aligner.utils.utils import adapter_control, cpu_weight_swap
 
 
-class MegatronGPTDPOModel(NLPAdapterModelMixin, MegatronGPTModel, SupervisedInterface):
+class MegatronDPOMixin:
     """
     Megatron GPT DPO Model Training.
     """
@@ -605,3 +606,10 @@ class MegatronGPTDPOModel(NLPAdapterModelMixin, MegatronGPTModel, SupervisedInte
 
         # return in GPU, trainer needs to move to cpu
         return ref_log_probs
+
+
+class MegatronMambaDPOModel(MegatronDPOMixin, NLPAdapterModelMixin, MegatronMambaModel, SupervisedInterface):
+    ...
+
+class MegatronGPTDPOModel(MegatronDPOMixin, NLPAdapterModelMixin, MegatronGPTModel, SupervisedInterface):
+    ...

@@ -18,14 +18,16 @@ import torch
 
 from nemo.collections.nlp.modules.common.megatron.utils import get_ltor_masks_and_position_ids
 from nemo_aligner.utils.utils import batch_pad_to_fixed_len
+from nemo_aligner.experimental.grpo.data.nemo_text_utils import apply_nemo_chat_template
 
 #TODO @sahilj handle too-long prompts and masking them out throughout the whole process and renormalizing on loss
 class AllTaskDataset:
-    def __init__(self, data_path, tokenizer, apply_chat_template: bool = True, system_prompt_file: str = None, prompt_file: str = None, seq_length=None):
+    def __init__(self, data_path, tokenizer, apply_chat_template: bool = True, chat_prompt_tokens: dict[str, str] = None, system_prompt_file: str = None, prompt_file: str = None, seq_length=None):
         super().__init__()
         self.data_path = data_path
         self.tokenizer = tokenizer
         self.apply_chat_template = apply_chat_template
+        self.chat_prompt_tokens = chat_prompt_tokens
         self.system_prompt = None
         self.prompt = "{}"
 
@@ -73,7 +75,14 @@ class AllTaskDataset:
             if self.system_prompt:
                 chat.append({"role": "system", "content": self.system_prompt})
             chat.append({"role": "user", "content": self.prompt.format(text_str)})
-            text = self.tokenizer.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+
+            if hasattr(self.tokenizer.tokenizer, 'apply_chat_template'):
+                # TODO: consider passing chat templates forward (form the jinja template from old nemo1 chat_prompt_tokens)
+                text = self.tokenizer.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+            else:
+                if not self.chat_prompt_tokens:
+                    raise ValueError("chat_prompt_tokens must be specified if apply_chat_template is true and the tokenizer does not have an apply_chat_template method")
+                text = apply_nemo_chat_template(chat, self.chat_prompt_tokens, add_generation_prompt=True)
         else:
             text = self.prompt.format(text_str)
 

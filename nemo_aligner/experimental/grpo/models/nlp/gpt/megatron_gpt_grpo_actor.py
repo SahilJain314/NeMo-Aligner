@@ -30,6 +30,7 @@ from safetensors.torch import save_file
 from huggingface_hub import snapshot_download
 
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+from nemo.collections.nlp.models.language_modeling.megatron_mamba_model import MegatronMambaModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
     get_iterator_k_split,
@@ -73,7 +74,8 @@ from nemo_aligner.experimental.grpo.models.nlp.gpt import conversion_dict as CON
 
 from tensor_comms.shared_tensors import SharedCPUMemoryTensorDict
 
-class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGenerativeInterface):
+
+class MegatronActorMixin(NLPAdapterModelMixin, MegatronGPTModel, AlignableGenerativeInterface):
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer=trainer)
         self.automatic_optimization = False
@@ -461,7 +463,7 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
                 source_hf_jsons_dir = self.cfg.hf_model_name_or_configs_dir
             else:
                 # Otherwise, treat it as a HuggingFace model name and download all .json files from the repo.
-                source_hf_jsons_dir = snapshot_download(self.cfg.hf_model_name_or_configs_dir, allow_patterns=["*.json"], ignore_patterns=["*.index.json"])
+                source_hf_jsons_dir = snapshot_download(self.cfg.hf_model_name_or_configs_dir, allow_patterns=["*.json", "*.py"], ignore_patterns=["*.index.json"])
         # os.chmod(out_dir, 0o777)
         class SafeDict(dict):
             def __missing__(self, key):
@@ -520,7 +522,10 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
                     format_dict = SafeDict(l=local_layer, gl=global_layer)
                     
                     # Use the conversion dict to get the appropriate recipe for this parameter.
-                    formatted_mapping = {k.format_map(format_dict): rec for k, rec in CONVERTER.mcore_te_to_hf_llama.items()}
+                    if self.cfg.grpo.inference_backend.converter_type not in CONVERTER.CHECKPOINT_MAPPINGS:
+                        raise KeyError(f"Unsupported converter_type={self.cfg.grpo.inference_backend.converter_type}. Please select an option in {list(CONVERTER.CHECKPOINT_MAPPINGS.keys())}")
+                    formatted_mapping = {k.format_map(format_dict): rec for k, rec in CONVERTER.CHECKPOINT_MAPPINGS[self.cfg.grpo.inference_backend.converter_type].items()}
+
                     recipe = formatted_mapping.get(owner_raw_key, None)
                     if recipe is None:
                         print(f"WARNING: {owner_raw_key} has no recipe mapping for conversion", flush=True)
@@ -600,7 +605,8 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
                 try:
                     os.makedirs(out_dir, exist_ok=True, mode=0o777)
                     for file in os.listdir(source_hf_jsons_dir):
-                        if file.endswith('.json') and not file.endswith('.index.json'):
+                        if (file.endswith('.json') and not file.endswith('.index.json')) or \
+                            file.endswith('.py'):
                             src = os.path.join(source_hf_jsons_dir, file)
                             dst = os.path.join(out_dir, file)
                             shutil.copy(src, dst)
@@ -802,3 +808,12 @@ class MegatronGPTActorModel(NLPAdapterModelMixin, MegatronGPTModel, AlignableGen
         position_ids = position_ids.expand(tokens.size(0), -1)
 
         return attention_mask, loss_mask, position_ids
+
+
+class MegatronGPTActorModel(MegatronActorMixin, NLPAdapterModelMixin, MegatronGPTModel, AlignableGenerativeInterface):
+    ...
+
+
+class MegatronMambaActorModel(MegatronActorMixin, NLPAdapterModelMixin, MegatronMambaModel, AlignableGenerativeInterface):
+    ...
+

@@ -257,7 +257,7 @@ def load_2_0_checkpoint_model_config(restore_path: str):
     return None
 
 
-def load_and_override_model_config(restore_path, model_cfg_to_overwrite, remove_meta_info=True):
+def load_and_override_model_config(restore_path, model_cfg_to_overwrite, remove_meta_info=True, return_target=False):
     """load the config in the model checkpoint and then overwrite it
         with whatever is provided
     """
@@ -268,7 +268,7 @@ def load_and_override_model_config(restore_path, model_cfg_to_overwrite, remove_
         checkpoint_cfg = load_checkpoint_model_config(restore_path)
 
     if remove_meta_info:
-        checkpoint_cfg.pop("target", None)
+        target = checkpoint_cfg.pop("target", None)
         checkpoint_cfg.pop("nemo_version", None)
 
     if "overwrite_base_config" in model_cfg_to_overwrite:
@@ -279,7 +279,10 @@ def load_and_override_model_config(restore_path, model_cfg_to_overwrite, remove_
     # Remove the "overwrite_base_config" key to avoid cluttering the model config.
     merged_cfg.pop("overwrite_base_config", None)
 
-    return merged_cfg
+    if return_target:
+        return merged_cfg, target
+    else:
+        return merged_cfg
 
 
 def remove_overwritten_fields(base_config, overwrite_config):
